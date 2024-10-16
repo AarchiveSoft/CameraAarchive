@@ -12,6 +12,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from unidecode import unidecode
 
 
 class UserInteraction:
@@ -25,6 +26,7 @@ class UserInteraction:
 
     :return: A list of selected camera brands chosen by the user.
     """
+
     def brand_selection():
         """
         Allows the user to select from a list of camera brands.
@@ -197,21 +199,31 @@ class Scrape:
 
             info = {}
 
-            for row in data_rows:
-                elements = row.find_elements(By.TAG_NAME, 'td')
-                legend = elements[0].text
+            for row in data_rows[1:]:
                 try:
-                    data = elements[1].text
-                except IndexError:
-                    print(f"No Data found associated with: {legend}")
-                    data = None
+                    elements = row.find_elements(By.TAG_NAME, 'td')
+                    legend = elements[0].text
+                    # Check if there's a nested table within the td tag
+                    nested_table = elements[1].find_elements(By.TAG_NAME, 'table')
+                    if nested_table:
+                        # If there's a nested table, iterate through its tds and concatenate results
+                        sub_table_rows = nested_table[0].find_elements(By.TAG_NAME, 'tr')
+                        data = [', '.join([col.text for col in sub_row.find_elements(By.TAG_NAME, 'td')]) for sub_row in
+                                sub_table_rows]
+                    else:
+                        # If there's no nested table, just retrieve the corresponding text
+                        data = elements[1].text
 
-                if legend is not None and data is not None:
-                    info[legend] = data
-                else:
-                    info = {}
-                    print("Couldn't populate info")
+                    if legend is not None and data is not None and not legend[0].isdigit():
+                        info[legend] = data
+                    else:
+                        print("Couldn't populate info")
+                        continue
+                except Exception as e:
+                    print(f"An error occurred trying to get legend/data pairs: {e}")
                     continue
+
+            print(info)
 
             self.insert_product_specs(brand, model, info)
 
@@ -222,34 +234,64 @@ class Scrape:
         """
         return WebDriverWait(self.driver, 10).until(condition)
 
+    def transform_column_names(self, column_names):
+        def transform(column_name):
+            column_name = unidecode(column_name).replace(' ', '_').replace('(', '').replace(')', '').replace(
+                '.',
+                '_') \
+                .replace('*', '').replace('-', '_').replace(',', '_')
+            # if column_name and column_name[0].isdigit():
+            #     column_name = f"c{column_name}"
+
+            return column_name
+
+        return {ori: transform(ori) for ori in column_names}
+
     def add_column_if_not_exists(self, column_name):
         """
-        :param column_name: 
-        :return: 
+        Helper method to add a new column to the SQLite3 DB.
+        Look ahead method that checks if a column exists.
+        :param column_name: column name
         """
-        column_name = column_name.replace(' ', '_').replace('(', '').replace(')', '')
-        self.c.execute("PRAGMA table_info(camerAarchive)")
 
-        columns = [info[1] for info in self.c.fetchall()]
+        column_name = self.transform_column_names([column_name])[column_name]
+
+        if not column_name:
+            return
+
+        self.c.execute("PRAGMA table_info('camerAarchive')")
+        columns = [tup[1] for tup in self.c.fetchall()]
         if column_name not in columns:
+            print(f"Adding column '{column_name}'")
             self.c.execute(f"ALTER TABLE camerAarchive ADD COLUMN {column_name} TEXT")
             self.conn.commit()
 
     def insert_product_specs(self, brand, name, specs):
-        for key in specs.keys():
-            self.add_column_if_not_exists(key)
+        transformed_columns = self.transform_column_names(specs.keys())
+        specs = {k: ' '.join(v) if isinstance(v, list) else v for k, v in specs.items() if
+                 transformed_columns.get(k, '').strip()}
 
-        # prepare dynamic sql query
-        columns = ', '.join([key.replace(' ', '_') for key in specs.keys()])
-        placeholders = ', '.join(['?' for _ in specs.values()])
-        values = list(specs.values())
-        self.c.execute(
-            f'''INSERT INTO camerAarchive (brand, name, {columns}) 
-                VALUES (?, ?, {placeholders}) 
-                ON CONFLICT(name) DO UPDATE SET {", ".join([f"{key.replace(' ', '_')} = ?" for key in specs.keys()])}''',
-            [brand] + [name] + values + values  # Insert values, then provide them again for the
-            # update
-        )
+        for ori_key, new_key in transformed_columns.items():
+            if new_key.strip():
+                self.add_column_if_not_exists(new_key)
+
+        placeholder_and_value_pairs = [
+            (col, '?', str(v).strip()) for col, v in zip(transformed_columns.values(), specs.values())
+            if col.strip() and v and str(v).strip()
+        ]
+        columns = ', '.join([col for col, ph, val in placeholder_and_value_pairs])
+        placeholders = ', '.join([ph for col, ph, val in placeholder_and_value_pairs])
+        values = [val for col, ph, val in placeholder_and_value_pairs]
+
+        update_statements = ', '.join([f"{col} = ?" for col, ph, val in placeholder_and_value_pairs])
+
+        sql_query = f'''INSERT INTO camerAarchive (brand, model, {columns})
+                        VALUES (?, ?, {placeholders})
+                        ON CONFLICT(model) DO UPDATE SET {update_statements}'''
+
+        combined_values = [brand, name] + 2 * values
+
+        self.c.execute(sql_query, combined_values)
         self.conn.commit()
 
 
