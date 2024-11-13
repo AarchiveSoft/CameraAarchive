@@ -11,6 +11,7 @@ import sys
 import time
 
 from selenium import webdriver
+from selenium.common import TimeoutException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
@@ -36,7 +37,8 @@ class UserInteraction:
         are stored in a list and returned once the selection process is completed.
 
         Returns:
-            tuple: A tuple containing a list of selected camera brands and a boolean indicating whether to scrape lenses.
+            tuple: A tuple containing a list of selected camera brands and a boolean indicating whether to scrape
+            lenses.
         """
         brands = ['Nikon', 'Sony', 'Canon', 'Leica', 'Fujifilm']
         selected_brands = []
@@ -77,7 +79,7 @@ class UserInteraction:
               "\nType 'y' to scrape lenses"
               "\nType 'n' to skip lenses\n")
         while True:
-            user_lens_decision = input("Answer: ")
+            user_lens_decision = input("Answer ('y'/'n'): ")
             if user_lens_decision.lower() == 'y':
                 print("Scraping lenses...")
                 scrape_lenses = True
@@ -152,18 +154,24 @@ class UserInteraction:
               "\nEnable Console Logs?"
               "\n- Displays Updates about the running process in the console"
               "\n- Mainly useful for Headless mode"
-              "\n____________________")
+              "\n____________________"
+              "\n\nType '1': No Logs"
+              "\n\nType '2': Only Show Progress Updates"
+              "\n\nType '3': Full Log, including Debug Logs")
         while True:
-            user_input = input("\nAnswer ('y'/'n'): ")
+            user_input = input("\nAnswer: ")
 
-            if user_input.lower() == 'y':
-                return True
-            elif user_input.lower() == 'n':
-                return False
+            if user_input == '1':
+                return False, False
+            elif user_input == '2':
+                return True, False
+            elif user_input == '3':
+                return True, True
             else:
                 print("\nInvalid input, please try again\n")
 
     def format_print(title, text):
+        # sourcery skip: instance-method-first-arg-name
         """
         Formats and centers the provided title and text for console output.
 
@@ -186,6 +194,30 @@ class UserInteraction:
         return (f"\n{top_line}"
                 f"\n{text}"
                 f"\n{bottom_line}")
+
+    def progress_bar(progress, total, bar_length=50):
+        # sourcery skip: instance-method-first-arg-name
+        """
+        Displays or updates a console progress bar.
+
+        Args:
+            progress (int): The current progress (e.g., an iteration number).
+            total (int): The total amount of progress (e.g., total iterations).
+            bar_length (int): The length of the progress bar in characters (default 50).
+        """
+        # Calculate progress percentage and fill length
+        percentage = progress / total
+        fill_length = int(bar_length * percentage)
+
+        # Create the bar
+        bar = '█' * fill_length + '-' * (bar_length - fill_length)
+
+        # Print the bar with the percentage, updating in place
+        print(f'\r|{bar}| {percentage:.2%}', end='\r')
+
+        # Ensure the bar is complete when the task is done
+        if progress == total:
+            print()
 
 
 class Scrape:
@@ -215,7 +247,7 @@ class Scrape:
         print(f"Brands selected for scraping: {self.selected_brands}")
         self.headless_mode = UserInteraction.enable_headless()
         self.skip_cameras = UserInteraction.skip_camera_scraping()
-        self.log_enabled = UserInteraction.enable_feedback()
+        self.progress_log_enabled, self.debug_log_enabled = UserInteraction.enable_feedback()
         self.setup_db()
         self.driver = self.setup_driver(self.headless_mode)
         self.scrape_for_links()
@@ -246,22 +278,29 @@ class Scrape:
         chrome_options.binary_location = os.path.join(base_path, 'chrome', 'win64-118.0.5993.70', 'chrome-win64',
                                                       'chrome.exe')
         if headless:
-            if self.log_enabled:
+            if self.progress_log_enabled:
                 print(UserInteraction.format_print("ENABLED", "Headless Mode Enabled"))
             # Enable headless mode
             chrome_options.add_argument("--headless")
             chrome_options.add_argument("--disable-gpu")  # Optional: speeds up headless mode on Windows
             chrome_options.add_argument("--no-sandbox")  # Recommended for certain environments
             chrome_options.add_argument("--disable-dev-shm-usage")  # Recommended for memory efficiency
-        elif self.log_enabled:
+        elif self.progress_log_enabled:
             print(UserInteraction.format_print("DISABLED", "Headless Mode Disabled"))
+
+        if self.progress_log_enabled and self.debug_log_enabled:
+            print(UserInteraction.format_print("ENABLED", "Progress and Debug Log Enabled"))
+        elif self.progress_log_enabled:
+            print(UserInteraction.format_print("ENABLED", "Progress Log Enabled"))
+        else:
+            print(UserInteraction.format_print("DISABLED", "All Logs Disabled"))
 
         service = Service(chromedriver_path)
 
         try:
             return webdriver.Chrome(service=service, options=chrome_options)
         except Exception as e:
-            if self.log_enabled:
+            if self.progress_log_enabled and self.debug_log_enabled:
                 print(f"An error occurred: {e}")
 
     def setup_db(self):
@@ -293,86 +332,113 @@ class Scrape:
 
     def scrape_for_links(self):
         """
-        Scrapes camera links from the digitalkamera.de website.
-
-        This method retrieves links for cameras based on the selected brands and stores them in a dictionary for
-        further processing.
+        Scrapes camera and/or lens links from digitalkamera.de based on user selection.
         """
-        if self.log_enabled:
-            print(UserInteraction.format_print("GATHERING LINKS",
-                                               "Getting page: https://www.digitalkamera.de/Kamera/Schnellzugriff.aspx"))
+        if not self.skip_cameras:
+            if self.progress_log_enabled:
+                print(UserInteraction.format_print("GATHERING CAMERA LINKS",
+                                                   "Getting page: "
+                                                   "https://www.digitalkamera.de/Kamera/Schnellzugriff.aspx"))
 
-        self.driver.get("https://www.digitalkamera.de/Kamera/Schnellzugriff.aspx")
+            self.driver.get("https://www.digitalkamera.de/Kamera/Schnellzugriff.aspx")
 
-        # check for - and if necessary click away - cookie popup
-        try:
-            popup = self.wait(EC.visibility_of_element_located((By.CSS_SELECTOR, ".fc-dialog-container")))
-            reject_button = popup.find_element(By.CSS_SELECTOR, "button[aria-label='Nicht einwilligen']")
-            reject_button.click()
-            print(UserInteraction.format_print("UPDATE", "Pop Up Cookie Window closed"))
-        except Exception as e:
-            if self.log_enabled:
-                print(f"Cookie Popup didn't show: {e}")
+            # Handle cookie popup if present
+            try:
+                popup = self.wait(EC.visibility_of_element_located((By.CSS_SELECTOR, ".fc-dialog-container")))
+                reject_button = popup.find_element(By.CSS_SELECTOR, "button[aria-label='Nicht einwilligen']")
+                reject_button.click()
+                if self.progress_log_enabled:
+                    print(UserInteraction.format_print("UPDATE", "Pop Up Cookie Window closed"))
+            except Exception as e:
+                if self.progress_log_enabled and self.debug_log_enabled:
+                    print(f"Cookie Popup didn't show: {e}")
 
-        # wait for page to load
-        self.wait(EC.visibility_of_element_located((By.CSS_SELECTOR, "div[id='center-col'] h2")))
+            # Wait for page to load
+            self.wait(EC.visibility_of_element_located((By.CSS_SELECTOR, "div[id='center-col'] h2")))
 
-        # get content container
-        content_container = self.wait(EC.presence_of_element_located((By.CSS_SELECTOR, ".schnellzugriff-links")))
-        brand_elements = content_container.find_elements(By.CLASS_NAME, 'schnellzugriff-hersteller')
-        product_elements = content_container.find_elements(By.CLASS_NAME, 'schnellzugriff-produkt')
+            # Get content container
+            content_container = self.wait(EC.presence_of_element_located((By.CSS_SELECTOR, ".schnellzugriff-links")))
+            brand_elements = content_container.find_elements(By.CLASS_NAME, 'schnellzugriff-hersteller')
+            product_elements = content_container.find_elements(By.CLASS_NAME, 'schnellzugriff-produkt')
 
-        self.brand_link_dict = {}
+            self.brand_link_dict = {}
 
-        # If the brand_elements and product_elements have the same length
-        if len(brand_elements) == len(product_elements):
-            for i in range(len(brand_elements)):
-                camera_elements = product_elements[i]
-                camera_link_elements = camera_elements.find_elements(By.TAG_NAME, 'a')
+            total_brands = len(brand_elements)
 
-                links = [element.get_attribute('href') for element in camera_link_elements]
-                self.brand_link_dict[brand_elements[i].text] = links
-        elif self.log_enabled:
-            print("Error: Mismatch in the length of brand and product elements.")
+            if total_brands == len(product_elements):
+                for i in range(total_brands):
+                    camera_elements = product_elements[i]
+                    camera_link_elements = camera_elements.find_elements(By.TAG_NAME, 'a')
 
-        if self.log_enabled:
-            for brand, links in self.brand_link_dict.items():
-                print(f"Brand: {brand}\nLinks: {list(links)}\n\n")
+                    links = [element.get_attribute('href') for element in camera_link_elements]
+                    self.brand_link_dict[brand_elements[i].text] = links
+
+                    # update progress bar
+                    if self.progress_log_enabled:
+                        UserInteraction.progress_bar(i + 1, total_brands)
+            elif self.progress_log_enabled and self.debug_log_enabled:
+                print("Error: Mismatch in the length of brand and product elements.")
+
+            if self.progress_log_enabled and self.debug_log_enabled:
+                for brand, links in self.brand_link_dict.items():
+                    print(f"Brand: {brand}\nLinks: {list(links)}\n\n")
 
         if self.scrape_lenses:
             self.scrape_for_lens_links()
 
-    def scrape_for_lens_links(self):
+    def scrape_for_lens_links(self):  # sourcery skip: move-assign
         """
         Scrapes lens links from the digitalkamera.de website.
 
         This method retrieves links for lenses based on the selected brands and stores them in a dictionary for
         further processing.
         """
-        if self.log_enabled:
+        if self.progress_log_enabled:
             print(UserInteraction.format_print("GATHERING LINKS",
                                                "Getting page: "
                                                "https://www.digitalkamera.de/Objektiv/Schnellzugriff.aspx"))
 
-        lens_content_container = self.wait(EC.visibility_of_element_located(
-            (By.CSS_SELECTOR, ".schnellzugriff-links")))
+        self.driver.get("https://www.digitalkamera.de/Objektiv/Schnellzugriff.aspx")
+
+        # Handle cookie popup if present
+        try:
+            popup = self.wait(EC.visibility_of_element_located((By.CSS_SELECTOR, ".fc-dialog-container")))
+            reject_button = popup.find_element(By.CSS_SELECTOR, "button[aria-label='Nicht einwilligen']")
+            reject_button.click()
+            if self.progress_log_enabled:
+                print(UserInteraction.format_print("UPDATE", "Pop Up Cookie Window closed"))
+        except Exception as e:
+            if self.progress_log_enabled and self.debug_log_enabled:
+                print(f"Cookie Popup didn't show: {e}")
+
+        try:
+            lens_content_container = self.wait(EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, ".schnellzugriff-links")))
+        except TimeoutException as e:
+            print(f"Timed out trying to locate lens container: {e}")
 
         lens_brand_elements = lens_content_container.find_elements(By.TAG_NAME, "h3")
         lens_link_list_element = lens_content_container.find_elements(By.TAG_NAME, "div")
 
         self.lens_brand_link_dict = {}
 
+        total_brands = len(lens_brand_elements)
+
         if len(lens_brand_elements) == len(lens_link_list_element):
-            for i in range(len(lens_brand_elements)):
+            for i in range(total_brands):
                 selected_brand_link_element = lens_link_list_element[i]
                 selected_brand_links = selected_brand_link_element.find_elements(By.TAG_NAME, 'a')
 
                 links = [element.get_attribute('href') for element in selected_brand_links]
                 self.lens_brand_link_dict[lens_brand_elements[i].text] = links
-        else:
+
+                # update progress bar
+                if self.progress_log_enabled:
+                    UserInteraction.progress_bar(i + 1, total_brands)
+        elif self.progress_log_enabled and self.debug_log_enabled:
             print("Error: Mismatch in the length of brand and product elements.")
 
-        if self.log_enabled:
+        if self.progress_log_enabled:
             for brand, links in self.lens_brand_link_dict.items():
                 print(f"LENS Brand: {brand}\nLinks: {list(links)}\n\n")
 
@@ -386,17 +452,22 @@ class Scrape:
         Returns:
             tuple: A tuple containing two lists - links for cameras and links for lenses.
         """
-        links = []
+        camera_links = []
         lens_links = []
-        for key, values in self.brand_link_dict.items():
-            if key in brands:
-                links.extend(values)
+
+        if not self.skip_cameras:
+            # Collect camera links only from brand_link_dict
+            for brand, values in self.brand_link_dict.items():
+                if brand in brands:
+                    camera_links.extend(values)
+
+        # Collect lens links only from lens_brand_link_dict
         if self.scrape_lenses:
-            for key, values in self.lens_brand_link_dict.items():
-                if key in brands:
+            for brand, values in self.lens_brand_link_dict.items():
+                if brand in brands:
                     lens_links.extend(values)
 
-        return links, lens_links
+        return camera_links, lens_links
 
     def process_cameras(self, skip_cameras):
         """
@@ -413,12 +484,14 @@ class Scrape:
         camera_links, lens_links = self.process_links(self.selected_brands)
 
         if skip_cameras:
-            if self.log_enabled:
+            if self.progress_log_enabled:
                 print(UserInteraction.format_print("SKIPPING", "Skipping Cameras and proceeding with Lenses"))
             self.process_lenses(lens_links)
             return
 
-        for link in camera_links:
+        total_links = len(camera_links)
+
+        for i, link in enumerate(camera_links):
             self.driver.get(link)
 
             # wait for page to load and get parent element
@@ -435,8 +508,9 @@ class Scrape:
             brand = brand_model_split[0]
             model = brand_model_split[1]
 
-            if self.log_enabled:
+            if self.progress_log_enabled:
                 print(UserInteraction.format_print("UPDATE", f"Processing: {brand} {model}"))
+                UserInteraction.progress_bar(i + 1, total_links)
 
             info = {}
 
@@ -454,26 +528,26 @@ class Scrape:
                     else:
                         # If there's no nested table, just retrieve the corresponding text
                         data = elements[1].text
-                    if self.log_enabled:
+                    if self.progress_log_enabled and self.debug_log_enabled:
                         print(UserInteraction.format_print("UPDATE", f"{legend} = {data}"))
                     if legend is not None and data is not None and not legend[0].isdigit():
                         info[legend] = data
                     else:
-                        if self.log_enabled:
+                        if self.progress_log_enabled and self.debug_log_enabled:
                             print("Couldn't populate info")
                         continue
                 except Exception as e:
-                    if self.log_enabled:
+                    if self.progress_log_enabled and self.debug_log_enabled:
                         print(f"An error occurred trying to get legend/data pairs: {e}")
                     continue
 
-            if self.log_enabled:
+            if self.progress_log_enabled and self.debug_log_enabled:
                 print(info)
 
             self.insert_product_specs(brand, model, info)
 
         if self.scrape_lenses:
-            if self.log_enabled:
+            if self.progress_log_enabled:
                 print(UserInteraction.format_print("UPDATE", "Proceeding with Lenses"))
             self.process_lenses(lens_links)
 
@@ -500,7 +574,7 @@ class Scrape:
 
             model = data_rows[1].find_element(By.CLASS_NAME, 'colData1').text
 
-            if self.log_enabled:
+            if self.progress_log_enabled:
                 print(UserInteraction.format_print("UPDATE", f"Processing: {brand} {model}"))
 
             info = {}
@@ -523,16 +597,16 @@ class Scrape:
                         else:
                             # Otherwise, just retrieve the corresponding text
                             data = elements[1].text
-                        if self.log_enabled:
+                        if self.progress_log_enabled and self.debug_log_enabled:
                             print(UserInteraction.format_print("UPDATE", f"{legend} = {data}"))
 
                         if legend and data and not legend[0].isdigit():
                             info[legend] = data
                         else:
-                            if self.log_enabled:
+                            if self.progress_log_enabled and self.debug_log_enabled:
                                 print("Couldn't populate info")
                             continue
-                    elif self.log_enabled:
+                    elif self.progress_log_enabled and self.debug_log_enabled:
                         print(f"\nError Trace-> Row HTML: {row.get_attribute('outerHTML')}")
                         print(f"Elements: {elements} doesn't have at least 2 elements.")
                         print(f"Text: {[element.text for element in elements]}")
@@ -540,12 +614,14 @@ class Scrape:
                     else:
                         continue
                 except Exception as e:
-                    if self.log_enabled:
+                    if self.progress_log_enabled and self.debug_log_enabled:
                         print(f"Error occurred in row {index + 2} trying to get legend/data pairs: {e}")
                     continue
 
-            if self.log_enabled:
+            if self.progress_log_enabled and self.debug_log_enabled:
                 print(info)
+            elif self.progress_log_enabled:
+                print(UserInteraction.format_print("UPDATE", f"Processed: {brand} {model}"))
             self.insert_lens_product_specs(brand, model, info)
 
     def wait(self, condition):
@@ -575,6 +651,7 @@ class Scrape:
         Returns:
             dict: A dictionary mapping original column names to transformed names.
         """
+
         def transform(column_name):
             """
             :param column_name:
@@ -583,10 +660,10 @@ class Scrape:
             column_name = unidecode(column_name).replace(' ', '_').replace('(', '').replace(')', '').replace(
                 '.',
                 '_') \
-                .replace('*', '').replace('-', '_').replace(',', '_').replace('/', '_')
+                .replace('*', '').replace('-', '_').replace(',', '_').replace('/', '_').replace('"', '')
             # if column_name and column_name[0].isdigit():
             #     column_name = f"c{column_name}"
-            if self.log_enabled:
+            if self.progress_log_enabled and self.debug_log_enabled:
                 print(UserInteraction.format_print("FORMAT", f"Transformed Column Name, returning: {column_name}"))
             return column_name
 
@@ -610,7 +687,7 @@ class Scrape:
         self.c.execute("PRAGMA table_info('camerAarchive')")
         columns = [tup[1] for tup in self.c.fetchall()]
         if column_name not in columns:
-            if self.log_enabled:
+            if self.progress_log_enabled:
                 print(UserInteraction.format_print("ADD", f"Adding new Column: {column_name}"))
             self.c.execute(f"ALTER TABLE camerAarchive ADD COLUMN {column_name} TEXT")
             self.conn.commit()
@@ -633,7 +710,7 @@ class Scrape:
         self.c.execute("PRAGMA table_info('lensAarchive')")
         columns = [tup[1] for tup in self.c.fetchall()]
         if column_name not in columns:
-            if self.log_enabled:
+            if self.progress_log_enabled:
                 print(UserInteraction.format_print("ADD", f"Adding new Column: {column_name}"))
             self.c.execute(f"ALTER TABLE lensAarchive ADD COLUMN {column_name} TEXT")
             self.conn.commit()
@@ -674,7 +751,7 @@ class Scrape:
 
         combined_values = [brand, name] + 2 * values
 
-        if self.log_enabled:
+        if self.progress_log_enabled:
             print(UserInteraction.format_print("INSERTING", f"Inserting Product Specs for: {brand} {name}"))
 
         self.c.execute(sql_query, combined_values)
@@ -716,7 +793,7 @@ class Scrape:
 
         combined_values = [brand, name] + 2 * values
 
-        if self.log_enabled:
+        if self.progress_log_enabled:
             print(UserInteraction.format_print("INSERTING", f"Inserting Product Specs for: {brand} {name}"))
 
         self.c.execute(sql_query, combined_values)
